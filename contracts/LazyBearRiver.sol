@@ -10,7 +10,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
  * @title Lazy Bear River
  * @dev ERC20 token that allows staking NFTs for rewards.
  * simulating population dynamics using logistic growth: ΔN = r × N × (K-N)/K
- *
+ * if bears reach unsustainable levels, the ecosystem will reset, and bears will die.
  * NFTs cannot be withdrawn once staked.
  * Virtual NFTs are created onchain, with metadata available offchain.
  */
@@ -22,9 +22,9 @@ contract LazyBearRiver is ERC20, IERC721Receiver, ReentrancyGuard {
   uint256 private constant FISH_PER_BEAR_PER_EPOCH = 0.1 ether;
 
   /****** ECOLOGICAL PARAMETERS ******/
-  uint256 private constant POPULATION_SCALING_FACTOR = 1000;
+  uint256 private constant POPULATION_SCALING_FACTOR = 100;
   uint256 private constant CARRYING_CAPACITY = 6900 ether;
-  uint256 private constant FISH_REGRESSION_RATE = 666;
+  uint256 private constant FISH_REGRESSION_RATE = 50;
 
   /****** TRACKING VARIABLES ******/
   uint256 public currentFishSupply;
@@ -50,28 +50,25 @@ contract LazyBearRiver is ERC20, IERC721Receiver, ReentrancyGuard {
   /****** EVENTS ********/
   event StakeNFTs(address indexed staker, uint256 tokenId, uint256 amount);
   event ClaimRewards(address indexed staker, uint256 amount);
-  event RewardRateChanged(uint256 oldRate, uint256 newRate);
-  event RiverSupplyCapChanged(uint256 oldCap, uint256 newCap);
   event ExtinctionEvent(uint256 timestamp);
   event ContractPaused(bool paused);
   event EcosystemUpdated(uint256 fishSupply, uint256 bears);
 
   constructor(address _legacyNFTContract) ERC20("lazy fish", "FISH") {
     // For LP
-    _mint(msg.sender, 33_000 ether);
+    _mint(msg.sender, 50_000 ether);
     startTime = block.timestamp;
     lastUpdateTime = block.timestamp;
-    currentFishSupply = 6899 * 1 ether;
+    currentFishSupply = 6899 ether;
     require(currentFishSupply < CARRYING_CAPACITY, "River cannot exceed max supply");
     legacyNFTContract = IERC721(_legacyNFTContract);
   }
 
-  // TODO: TESTING ONLY REMOVE THIS FOR PROD
-  function mint(address to, uint256 amount) public {
-    _mint(to, amount);
-  }
-
-  /****** STAKE FUNCTIONS ********/
+  /**
+   * @notice Stakes legacy NFTs into the river ecosystem
+   * @dev Transfers NFTs from user to contract and updates staking records
+   * @param tokenIds Array of NFT token IDs to stake
+   */
   function stakeLegacyNFTs(uint256[] memory tokenIds) external nonReentrant {
     require(!paused, "Contract is paused");
     require(tokenIds.length != 0, "No tokens to stake");
@@ -92,6 +89,11 @@ contract LazyBearRiver is ERC20, IERC721Receiver, ReentrancyGuard {
     stakers[msg.sender].bearsStaked += length;
   }
 
+  /**
+   * @notice Stakes FISH tokens to create virtual bears in the ecosystem
+   * @dev Burns FISH tokens and credits the user with virtual bears
+   * @param amount Amount of FISH tokens to stake (must be multiple of BEAR_COST)
+   */
   function stakeWithERC20(uint256 amount) external nonReentrant {
     require(!paused, "Contract is paused");
     require(amount >= BEAR_COST, "Cannot stake less than 10 FISH");
@@ -117,12 +119,19 @@ contract LazyBearRiver is ERC20, IERC721Receiver, ReentrancyGuard {
     emit StakeNFTs(msg.sender, 0, idsToMint);
   }
 
-  /****** CLAIM FUNCTIONS ********/
+  /**
+   * @notice Claims accumulated FISH rewards for the caller
+   * @dev Updates ecosystem state and mints reward tokens to the caller
+   */
   function claimRewards() external nonReentrant {
     _updateEcosystem();
     _claimRewards(msg.sender);
   }
 
+  /**
+   * @dev Internal function to calculate and distribute rewards to a user
+   * @param sender Address of the user claiming rewards
+   */
   function _claimRewards(address sender) internal {
     Staker storage staker = stakers[sender];
     
@@ -142,6 +151,13 @@ contract LazyBearRiver is ERC20, IERC721Receiver, ReentrancyGuard {
     staker.lastClaimTime = block.timestamp;
   }
   
+  /**
+   * @notice Calculates pending rewards for a user
+   * @dev Handles extinction events that may have occurred since last claim
+   * @param sender Address of the user to calculate rewards for
+   * @return rewards Amount of FISH tokens to be rewarded
+   * @return relevantExtinctionTime Timestamp of extinction event if one occurred since last claim
+   */
   function calculateRewards(address sender) public view returns (uint256 rewards, uint256 relevantExtinctionTime) {
     Staker memory staker = stakers[sender];
     
@@ -199,11 +215,18 @@ contract LazyBearRiver is ERC20, IERC721Receiver, ReentrancyGuard {
   }
 
 
-  /****** ECOLOGICAL FUNCTIONS ********/
+  /**
+   * @notice Updates the river ecosystem state
+   * @dev Can be called by anyone to update fish population and check for extinction events
+   */
   function updateEcosystem() external nonReentrant {
     _updateEcosystem();
   }
 
+  /**
+   * @dev Internal function that updates fish population based on ecological model
+   * @return extinction Boolean indicating if an extinction event occurred
+   */
   function _updateEcosystem() internal returns (bool extinction) {
     uint256 timeElapsed = block.timestamp - lastUpdateTime;    
     // Calculate number of epochs that have passed
@@ -240,7 +263,9 @@ contract LazyBearRiver is ERC20, IERC721Receiver, ReentrancyGuard {
       return true;
     } else {
       // Normal case: add regeneration, subtract consumption
-      currentFishSupply = _currentFishSupply + regeneration - totalConsumption;
+      uint256 newFishSupply = _currentFishSupply + regeneration - totalConsumption;
+      // Ensure fish population doesn't exceed carrying capacity
+      currentFishSupply = newFishSupply > CARRYING_CAPACITY ? CARRYING_CAPACITY : newFishSupply;
     }
     
     lastUpdateTime = block.timestamp;    
@@ -248,10 +273,21 @@ contract LazyBearRiver is ERC20, IERC721Receiver, ReentrancyGuard {
     return false;
   }
 
+  /**
+   * @notice Returns the current epoch number
+   * @dev Calculates epochs based on time elapsed since contract start
+   * @return Current epoch number
+   */
   function getCurrentEpoch() public view returns (uint256) {
     return (block.timestamp - startTime) / EPOCH_LENGTH;
   }
 
+  /**
+   * @notice Converts a timestamp to its corresponding epoch number
+   * @dev Used for reward calculations
+   * @param timestamp The timestamp to convert
+   * @return The epoch number for the given timestamp
+   */
   function getEpochFromTimestamp(uint256 timestamp) public view returns (uint256) {
     // Add underflow protection
     if (timestamp <= startTime) {
@@ -260,17 +296,21 @@ contract LazyBearRiver is ERC20, IERC721Receiver, ReentrancyGuard {
     return (timestamp - startTime) / EPOCH_LENGTH;
   }
 
-  /****** RESET ********/
+  /**
+   * @notice Unpauses the contract after an extinction event
+   * @dev Can only be called when the river has recovered to near carrying capacity
+   */
   function theRiverHasHealed() external nonReentrant {
     require(paused, "River is not paused");
     // Around Max Supply
-    require(currentFishSupply == CARRYING_CAPACITY - 10 ether, "River is not full enough`");
+    require(currentFishSupply > CARRYING_CAPACITY - 10 ether, "River is not full enough`");
     paused = false;
     emit ContractPaused(false);
   }
 
-  /****** IERC721Receiver ********/
+  // Ironic given this is supposed to stop tokens from being stuck in contracts
   /**
+   * @notice Handles receipt of ERC721 tokens
    * @dev Implementation of IERC721Receiver interface
    * This function is called by the NFT contract when tokens are transferred to this contract
    */

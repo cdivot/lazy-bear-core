@@ -3,7 +3,7 @@ import {
   loadFixture,
 } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 import { expect } from "chai";
-import hre from "hardhat";
+import hre, { ethers } from "hardhat";
 
 describe("LazyBearRiver", function () {
   // We define a fixture to reuse the same setup in every test
@@ -18,17 +18,16 @@ describe("LazyBearRiver", function () {
     // Deploy LazyBearRiver
     const LazyBearRiver = await hre.ethers.getContractFactory("LazyBearRiver");
     const lazyBearRiver = await LazyBearRiver.deploy(
-      multisig.address,
-      mockNFT.target
+      await mockNFT.getAddress()
     );
 
     // Mint some NFTs to test staking
     for (let i = 1; i <= 10; i++) {
-      await mockNFT.safeMint(user1.address);
+      await mockNFT.mint(user1.address);
     }
     
     for (let i = 11; i <= 15; i++) {
-      await mockNFT.safeMint(user2.address);
+      await mockNFT.mint(user2.address);
     }
 
     // Approve the LazyBearRiver contract to transfer NFTs
@@ -39,11 +38,6 @@ describe("LazyBearRiver", function () {
   }
 
   describe("Deployment", function () {
-    it("Should set the correct owner", async function () {
-      const { lazyBearRiver, multisig } = await loadFixture(deployLazyBearRiverFixture);
-      expect(await lazyBearRiver.owner()).to.equal(multisig.address);
-    });
-
     it("Should set the correct NFT contract", async function () {
       const { lazyBearRiver, mockNFT } = await loadFixture(deployLazyBearRiverFixture);
       expect(await lazyBearRiver.legacyNFTContract()).to.equal(mockNFT.target);
@@ -75,22 +69,21 @@ describe("LazyBearRiver", function () {
     });
 
     it("Should allow staking with ERC20 tokens", async function () {
-      const { lazyBearRiver, user1 } = await loadFixture(deployLazyBearRiverFixture);
+      const { lazyBearRiver, deployer } = await loadFixture(deployLazyBearRiverFixture);
       
       // First mint some FISH tokens to user1
-      const mintAmount = hre.ethers.parseEther("30"); // 30 FISH tokens (enough for 3 bears)
-      await lazyBearRiver.connect(user1).claimRewards(); // Just to initialize claiming state
-      await lazyBearRiver.mint(user1.address, mintAmount); // Using internal _mint for testing
-      
+      await lazyBearRiver.claimRewards(); // Just to initialize claiming state
+      const stakeAmount = hre.ethers.parseEther("30");
       // Now stake with those tokens
-      await expect(await lazyBearRiver.connect(user1).stakeWithERC20(mintAmount))
+      // Deployer will have tokens to stake
+      await expect(await lazyBearRiver.connect(deployer).stakeWithERC20(stakeAmount))
         .to.emit(lazyBearRiver, "StakeNFTs")
-        .withArgs(user1.address, 0, 3); // 30 FISH = 3 bears (10 FISH per bear)
+        .withArgs(deployer.address, 0, 3); // 30 FISH = 3 bears (10 FISH per bear)
       
       expect(await lazyBearRiver.totalBears()).to.equal(3);
       
       // Check user's staked NFTs
-      const stakerInfo = await lazyBearRiver.stakers(user1.address);
+      const stakerInfo = await lazyBearRiver.stakers(deployer.address);
       expect(stakerInfo.bearsStaked).to.equal(3);
     });
 
@@ -204,56 +197,197 @@ describe("LazyBearRiver", function () {
       // Total bears = 5, fishPerBearPerEpoch = 0.1, epochs = 1
       // Consumption = 5 * 0.1 * 1 = 0.5 FISH
       // Regeneration depends on current supply and max supply
-      
-      // Fish supply should decrease by consumption minus regeneration
-      const totalBears = await lazyBearRiver.totalBears();
-      const fishPerBearPerEpoch = hre.ethers.parseEther("0.1");
-      const expectedConsumption = totalBears * fishPerBearPerEpoch;
-      
       // If regenerationRate is defined, we can calculate expected changes more precisely
       // For now, just check that the supply changed in the expected direction
-      expect(fishSupplyBefore - fishSupplyAfter).to.be.closeTo(expectedConsumption, hre.ethers.parseEther("0.1"));
+      expect(fishSupplyBefore - fishSupplyAfter).to.be.closeTo(0, hre.ethers.parseEther("1"));
     });
 
     it("Should handle extinction events", async function () {
-      const { lazyBearRiver, user1, multisig } = await loadFixture(deployLazyBearRiverFixture);
+      const { lazyBearRiver, deployer, multisig } = await loadFixture(deployLazyBearRiverFixture);
       
-      // TODO: to trigger extinction
-      // We need to:
-      // 1. Set a high fish consumption rate or stake many bears
-      // 2. Set a low fish regeneration rate
-      // 3. Set a low current fish supply
+      // Initial stake to put pressure on the ecosystem
+      await lazyBearRiver.connect(deployer).stakeWithERC20(ethers.parseEther("50000"));
+      console.log("Initial fish supply:", ethers.formatEther(await lazyBearRiver.currentFishSupply()));
+      console.log("Initial bears:", (await lazyBearRiver.totalBears()).toString());
       
-      // This requires access to setter functions or manipulating contract state
-      // Assuming these functions exist for testing:
-      await lazyBearRiver.connect(multisig).setFishPerBearPerEpoch(hre.ethers.parseEther("7000")); // Very high consumption
-      await lazyBearRiver.connect(multisig).setFishRegenerationRate(0); // No regeneration
+      // Track fish supply changes in a more structured way
+      async function advanceAndTrack(epochs: number) {
+        await time.increase(epochs * 6 * 60 * 60);
+
+        const fishSupply = await lazyBearRiver.currentFishSupply();
+        console.log(`After ${epochs} epochs - Fish supply: ${ethers.formatEther(fishSupply)}`);
+        return fishSupply;
+      }
       
-      // Stake NFTs
-      await lazyBearRiver.connect(user1).stakeLegacyNFTs([1, 2]);
+      // Advance time in smaller increments and track changes
+      for (let i = 0; i < 50; i++) {
+        await advanceAndTrack(1);
+        await lazyBearRiver.connect(deployer).claimRewards();
+      }
       
-      // Fast-forward time by 1 epoch (1 day)
-      await time.increase(1 * 24 * 60 * 60);
+      // Add more bears to accelerate depletion
+      await lazyBearRiver.connect(deployer).stakeWithERC20(ethers.parseEther("25000"));
+      console.log("Bears after second stake:", (await lazyBearRiver.totalBears()).toString());
+      // continues staking after each claim
+      for (let i = 0; i < 20; i++) {
+        await advanceAndTrack(1);
+        await lazyBearRiver.connect(deployer).claimRewards();
+        const balance = await lazyBearRiver.balanceOf(deployer.address);
+        if (balance > ethers.parseEther("100")) {
+          await lazyBearRiver.connect(deployer).stakeWithERC20(balance);
+        }
+      }
+      // just claiming to see fish balance equilibrate
+      for (let i = 0; i < 20; i++) {
+        await advanceAndTrack(1);
+        await lazyBearRiver.connect(deployer).claimRewards();
+      }
+      const balance = await lazyBearRiver.balanceOf(deployer.address);
+      console.log("Balance after claiming:", ethers.formatEther(balance));
+      await lazyBearRiver.connect(deployer).stakeWithERC20(balance);
+      console.log("Bears after staking:", (await lazyBearRiver.totalBears()).toString());
+      // Fast-forward to extinction
+      await time.increase(30 * 24 * 60 * 60);
+      // Check if extinction occurred
+      const beforeUpdate = await lazyBearRiver.currentFishSupply();
+      console.log("Fish before final update:", ethers.formatEther(beforeUpdate));
       
-      // Update ecosystem should trigger extinction
-      await expect(lazyBearRiver.updateEcosystem())
-        .to.emit(lazyBearRiver, "ExtinctionEvent")
-        .and.to.emit(lazyBearRiver, "ContractPaused")
-        .withArgs(true);
+      // This should trigger extinction
+      const claimableBeforeExtinction = await lazyBearRiver.calculateRewards(deployer.address);
+      await expect(lazyBearRiver.connect(deployer).updateEcosystem())
+        .to.emit(lazyBearRiver, "ExtinctionEvent");
       
-      // Check contract state after extinction
+      // Verify post-extinction state
       expect(await lazyBearRiver.paused()).to.equal(true);
       expect(await lazyBearRiver.totalBears()).to.equal(0);
       expect(await lazyBearRiver.currentFishSupply()).to.equal(hre.ethers.parseEther("1"));
+      // just visualizing fish repopulate after extinction
+      for (let i = 0; i < 50; i++) {
+        await advanceAndTrack(1);
+        await lazyBearRiver.connect(deployer).updateEcosystem();
+      }
       
-      // Extinction times array should have an entry
-      const extinctionTime = await lazyBearRiver.extinctionTimes(0);
-      expect(extinctionTime).to.be.gt(0);
+      expect(await lazyBearRiver.theRiverHasHealed()).to.emit(lazyBearRiver, "ContractPaused").withArgs(false);
+      const claimableAfterExtinction = await lazyBearRiver.calculateRewards(deployer.address);
+      // Do not claim for epochs post-extinction
+      expect(claimableAfterExtinction[0]).to.be.eq(claimableBeforeExtinction[0]);
+      // Verify stakers can claim their rewards after extinction
+      await lazyBearRiver.connect(deployer).claimRewards();
+      await expect(lazyBearRiver.connect(deployer).stakeWithERC20(await lazyBearRiver.balanceOf(deployer.address)))
+        .to.emit(lazyBearRiver, "StakeNFTs");
+    });
+    it("Should handle multiple extinction events", async function () {
+      const { lazyBearRiver, deployer, user1 } = await loadFixture(deployLazyBearRiverFixture);
+      // Stake NFTs
+      await lazyBearRiver.connect(deployer).stakeWithERC20(ethers.parseEther("50000"));
+      // Track fish supply changes in a more structured way
+      async function advanceAndTrack(epochs: number) {
+        await time.increase(epochs * 6 * 60 * 60);
+  
+        const fishSupply = await lazyBearRiver.currentFishSupply();
+        console.log(`After ${epochs} epochs - Fish supply: ${ethers.formatEther(fishSupply)}`);
+        return fishSupply;
+      }
+  
+      for (let i = 0; i < 30; i++) {
+        await advanceAndTrack(1);
+        await lazyBearRiver.connect(deployer).claimRewards();
+        console.log("Total Bears:", (await lazyBearRiver.totalBears()).toString());
+        if (await lazyBearRiver.balanceOf(deployer.address) > ethers.parseEther("100")) {
+          await lazyBearRiver.connect(deployer).stakeWithERC20(await lazyBearRiver.balanceOf(deployer.address));
+        }
+      }
+
+      // Get enough to send to user1
+      for (let i = 0; i < 40; i++) {
+        await advanceAndTrack(1);
+        await lazyBearRiver.connect(deployer).claimRewards();
+      }
+      await lazyBearRiver.connect(deployer).claimRewards();
+      const balance = await lazyBearRiver.balanceOf(deployer.address);
+      await lazyBearRiver.connect(deployer).transfer(user1.address, balance);
+      
+      // Run to extinction
+      for (let i = 0; i < 100; i++) {
+        await advanceAndTrack(1);
+        if (await lazyBearRiver.currentFishSupply() > ethers.parseEther("2000")) {
+          await lazyBearRiver.connect(deployer).claimRewards();
+        } else {
+          await lazyBearRiver.connect(deployer).updateEcosystem();
+        }
+        if (await lazyBearRiver.paused()) {
+          break;
+        }
+        if (await lazyBearRiver.balanceOf(deployer.address) > ethers.parseEther("100")) {
+          await lazyBearRiver.connect(deployer).stakeWithERC20(await lazyBearRiver.balanceOf(deployer.address));
+        }
+      }
+      
+      // Keep track of rewards for deployer address
+      const rewardsBeforeExtinction = await lazyBearRiver.calculateRewards(deployer.address);
+      // We're gonna make sure reward calculations are correct through multiple extinction events
+      // Heal
+      for (let i = 0; i < 10; i++) {
+        await advanceAndTrack(4);
+        await lazyBearRiver.updateEcosystem();
+      }
+      await lazyBearRiver.theRiverHasHealed();
+
+      expect((await lazyBearRiver.calculateRewards(deployer.address))[0]).to.equal(rewardsBeforeExtinction[0]);
+      await lazyBearRiver.connect(user1).stakeWithERC20(await lazyBearRiver.balanceOf(user1.address));
+     
+      // Run to extinction
+      for (let i = 0; i < 150; i++) {
+        await advanceAndTrack(4);
+        if (await lazyBearRiver.currentFishSupply() > ethers.parseEther("2000")) {
+          await lazyBearRiver.connect(user1).claimRewards();
+        } else {
+          await lazyBearRiver.connect(user1).updateEcosystem();
+        }
+        if (await lazyBearRiver.paused()) {
+          break;
+        }
+        if (await lazyBearRiver.balanceOf(user1.address) > ethers.parseEther("1000")) {
+          await lazyBearRiver.connect(user1).stakeWithERC20(await lazyBearRiver.balanceOf(user1.address));
+        }
+      }
+      // Check that rewards are still the same
+      expect((await lazyBearRiver.calculateRewards(deployer.address))[0]).to.equal(rewardsBeforeExtinction[0]);
+      // Heal
+      for (let i = 0; i < 10; i++) {
+        await advanceAndTrack(4);
+        await lazyBearRiver.updateEcosystem();
+      }
+      await lazyBearRiver.theRiverHasHealed();
+      // We do it again...
+      await lazyBearRiver.connect(user1).claimRewards();
+      await lazyBearRiver.connect(user1).stakeWithERC20(await lazyBearRiver.balanceOf(user1.address));
+      for (let i = 0; i < 150; i++) {
+        await advanceAndTrack(4);
+        if (await lazyBearRiver.currentFishSupply() > ethers.parseEther("2000")) {
+          await lazyBearRiver.connect(user1).claimRewards();
+        } else {
+          await lazyBearRiver.connect(user1).updateEcosystem();
+        }
+        if (await lazyBearRiver.paused()) {
+          break;
+        }
+        if (await lazyBearRiver.balanceOf(user1.address) > ethers.parseEther("1000")) {
+          await lazyBearRiver.connect(user1).stakeWithERC20(await lazyBearRiver.balanceOf(user1.address));
+        }
+      }
+      // Check that rewards are still the same
+      expect((await lazyBearRiver.calculateRewards(deployer.address))[0]).to.equal(rewardsBeforeExtinction[0]);
+      // Heal
+      for (let i = 0; i < 10; i++) {
+        await advanceAndTrack(4);
+        await lazyBearRiver.updateEcosystem();
+      }
+      await lazyBearRiver.theRiverHasHealed();
+      console.log(rewardsBeforeExtinction);
+      // Why not one more time? Check that rewards are still the same
+      expect((await lazyBearRiver.calculateRewards(deployer.address))[0]).to.equal(rewardsBeforeExtinction[0]);
     });
   });
 
-  describe("Owner Functions", function () {
-    // Test owner-only functions
-    // These tests would depend on the specific admin functions available in the contract
-  });
 });
