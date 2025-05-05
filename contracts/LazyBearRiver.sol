@@ -228,9 +228,8 @@ contract LazyBearRiver is ERC20, IERC721Receiver, ReentrancyGuard {
    * @return extinction Boolean indicating if an extinction event occurred
    */
   function _updateEcosystem() internal returns (bool extinction) {
-    uint256 timeElapsed = block.timestamp - lastUpdateTime;    
-    // Calculate number of epochs that have passed
-    uint256 epochs = timeElapsed / EPOCH_LENGTH;
+    
+    uint256 epochs = getCurrentEpoch() - getEpochFromTimestamp(lastUpdateTime);
     if (epochs == 0) return false;
     
     // Step 1: Calculate fish consumption by bears
